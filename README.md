@@ -128,33 +128,7 @@ The system includes multiple layers of protection to prevent damage:
     *   **Action**: It opens the Garage valve to create a massive heat sink, "dumping" the excess energy into the largest slab available to protect the boiler from tripping its High Limit switch.
     *   **Status**: Currently disabled as the primary logic handles load management effectively.
 
-## Tuning Guide: The TPI Logic
-The behavior of the system is governed by a **Feed-Forward Loop** defined by four key variables in the zone profiles. Modifying these variables allows you to change the "personality" of the heating curve:
 
-### The Control Variables
-1.  **Active Threshold (Start)**: The TPI % at which a zone is allowed to ask for heat.
-    *   *Higher (e.g., 30%)*: Requires a bigger temperature deficit to start. Prevents short cycles but causes larger temperature swings (sag).
-    *   *Lower (e.g., 20%)*: Reacts faster to cooling. Keeps temperature tighter but risks "starvation" (where a zone needs heat but never quite hits the trigger).
-    *   *Current Setting*: **23%** (Concrete), **22%** (Gypcrete). A "Micro-Deadband" setting that triggers early to prevent sag.
-
-2.  **Passive Threshold (Join)**: The TPI % required to *join* an existing cycle.
-    *   *Function*: Used to allow "Late Recruits" to hop on the bus.
-    *   *Strategy*: You can set this **lower than Active** (e.g., Active 25%, Passive 15%) to "Bank Heat". If the boiler is running anyway, why not top off a zone that is *almost* calling for heat? This extends the boiler cycle (efficiency) and pre-charges the zone (comfort).
-    *   *Debounce*: Both Active and Passive triggers require a **3-Minute Confirmation** (signal must be sustained) to prevent transient spikes.
-
-3.  **Retention Threshold (Brake)**: The TPI % at which a zone is kicked OFF *while the boiler is running*.
-    *   *Function*: This is the "Brake Pedal". Even if the boiler is firing, if a zone drops below this signal, its valve closes.
-    *   *Lower (e.g., 18%)*: "Soft Braking". Allows the zone to heat closer to the target temp. Good for low mass.
-    *   *Higher (e.g., 25%)*: "Aggressive Braking". Stops the zone significantly early to let coasting finish the job. Essential for high mass concrete.
-
-4.  **Exit Threshold (Stop)**: The TPI % at which a zone stops if it is the *last* zone running.
-    *   *Function*: The final "Door" to end a boiler cycle.
-
-### Tuning Strategies
-*   **Per-Room Customization**: Every zone is unique. A thick concrete slab in the basement might need `coef_int: 0.3`, while a thin gypcrete poured floor upstairs might handle `0.5` well. You should tune these TPI parameters individually for each room to match its specific reactivity.
-*   **For Overshoot**: **Raise** the Retention/Exit thresholds. This pulls the brake earlier (e.g., at 0.5°F below target instead of 0.1°F).
-*   **For Undershoot/Sag**: **Lower** the Active threshold. This hits the gas earlier (e.g., at 0.2°F below target instead of 0.5°F).
-*   **For "Twitchy" Behavior**: Verify the **3-Minute Debounce** and **5-Minute Valve Lockout** settings are active.
 
 ### Real World Example: The "Feed Forward" Effect
 How does this math translate to your house? Let’s assume your **Target Temp is 67°F** and your **Active Threshold is 23%**.
