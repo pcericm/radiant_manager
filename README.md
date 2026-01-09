@@ -62,6 +62,26 @@ To make this work comfortably, several advanced logic gates are applied:
 *   **Penalty Box**: If a zone successfully heats up and turns off, it enters a "Penalty Box" (10-minute cooldown) where it cannot request heat again, preventing jitter.
 *   **Scavenging**: If the boiler is already running, smaller zones are allowed to "piggyback" (scavenge) onto the active cycle even if they wouldn't satisfy the minimum load on their own. This feature can be toggled **per zone** via the `allow_scavenge: true/false` configuration parameter.
 
+### 4. Phase 4: Logic Hardening & Pulse Support (Jan 2026)
+To address "Flywheel Overshoot" in high-mass slabs and improve boiler safety, new logic layers were added:
+
+#### A. Native Pulse Support (Anti-Flywheel)
+The system now respects the native **PWM Cycle** of the Versatile Thermostat.
+*   **Old Way**: If `power_percent > 23%`, run continuously. Result: Overshoot.
+*   **New Way**: If VTherm switches to `Idle` (Pulse OFF), the zone stops immediately (subject to safety timers). This allows the system to "feather" heat input even when demand is high.
+
+#### B. Smart Buffer Strategy
+Buffer zones are no longer held hostage blindly.
+*   **Starvation Mode**: If Load < 32k or Boiler is Latched, Buffer is held to **+1.0°F** (Strict).
+*   **Healthy Mode**: If Load > 32k, Buffer releases at **+0.5°F** (Normal).
+*   **Latch Override**: If Boiler is in Minimum Run (Latch), Buffers are **forced active** to prevent self-imposed starvation.
+
+#### C. Safety Hierarchy
+1.  **Manual Override**: Supreme priority. Bypasses Penalty Box and Pulse Veto.
+2.  **Boiler Min Run**: Hard floor. If Boiler < 15m, zones CANNOT stop.
+3.  **Physical Off**: Hard veto. If User Tstat = Off, zone stays Off.
+4.  **Pulse Logic**: The "Soft" control layer.
+
 ## Solar Manager Integration
 The system includes a dedicated `solar_manager.py` module that provides feed-forward thermal inputs based on weather forecasts.
 *   **Purpose**: To prevent overheating on sunny days by "braking" the slab charging early in the morning.
@@ -94,8 +114,9 @@ The system includes multiple layers of protection to prevent damage:
     *   **Failure Mode**: If Home Assistant crashes, the physical thermostat remains at its last setpoint. The house will essentially default to maintaining a temperature either slightly above or slightly below the target, ensuring pipes don't freeze and the house doesn't bake.
 3.  **Emergency Stop**: A virtual input boolean (`input_boolean.radiant_emergency_stop`) that cuts all power to pumps and valves instantly.
 4.  **Valve Watchdog**: Monitors for "Stuck Valves" where the physical temperature rises significantly above target (>5°F overshoot), signaling a mechanical failure.
-5.  **Pump Cycling**: Ensures pumps are exercised daily (via the normal heating cycles) to prevent seizure.
-6.  **Boiler Cooldown**: Enforces a strict minimum "OFF" time for the boiler to purge heat and prevent stress cracks from rapid thermal cycling.
+5.  **Pump Cycling**: The system's "Pulse Maintenance" strategy ensures that even low-demand zones get flow regularly during the heating season.
+    *   *Natural Exercise*: Because of the daily ODR load matching, typically no zone sits idle for more than 24 hours in winter, preventing pump seizure.
+    *   *Off-Season*: (Note: This software does not currently enforce a summer exercise routine; we rely on the physical zone controller hardware or manual runs for off-season maintenance).6.  **Boiler Cooldown**: Enforces a strict minimum "OFF" time for the boiler to purge heat and prevent stress cracks from rapid thermal cycling.
 
 7.  **Smart Buffer Selection**: When the system needs to "recruit" a buffer zone to meet minimum boiler flow, it doesn't just dumbly pick the largest zone.
     *   **Logic**: It sorts all available candidates by their **Duty Cycle (Demand)**.
