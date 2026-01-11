@@ -1,7 +1,7 @@
 # Radiant Manager System Architecture
 
 ## Overview
-This system is an intelligent orchestration layer sitting between **Versatile Thermostat** entities and the physical boiler/valves. 
+This system is an intelligent orchestration layer sitting between **Versatile Thermostat** entities and the physical boiler/valves. It acts as a **"Control Plane"** that translates "Smart Thermostat" decisions into physical valve movements, protecting the hardware while optimizing for both Efficiency and Comfort. 
 
 Its primary purpose is to solve the **Short Cycling** and **Minimum Firing Rate** problems inherent in mixed lower mass and high mass radiant zones paired with high-efficiency condensing boilers, while providing knobs to tune the balance between **Efficiency** and **Comfort**.
 
@@ -50,17 +50,17 @@ The system does *not* decide the room temperature. It relies on the [Versatile T
 *   **Global Orchestration**: All VTherm "Proxy Thermostats" are logically slaved to a central **"Boiler Master"** bus. This allows the entire heating system to be armed or disarmed (turned 'Heat' or 'Off') via a single toggle, ensuring positive shutdown when needed.
 *   **Signal**: We read this duty cycle via `sensor.{zone}_power_percent`.
 
-### 2. The Processor: Radiant Manager (Queueing)
-Instead of firing the boiler immediately when a zone calls for heat (which would cause short cycling if the zone is small), the manager acts as a **Queueing System**.
-*   **Consolidation**: It watches all zones. If a zone is calling for heat (high duty cycle), it enters the queue.
-*   **Load Calculation**: It calculates the BTU load of the queue based on the current water temperature (Outdoor Reset) and flow rates. **Zone BTU loads used in this calculation are derived directly from the home's original Manual J documentation.**
-*   **The Gate**: The boiler fires ONLY when the total queued load exceeds `BOILER_MIN_FIRE`. This is set to **32,000 BTUh**, which accounts for the 25% minimum fire rate deration of the 399k BTUh Laars boiler required at **7,000ft altitude**.
+### 2. The Processor: VTherm Orchestrator (The Relay)
+Previously, a custom Python queue manager (`radiant_manager.py`) handled all logic. As of Jan 2026, we have migrated to the **VTherm Orchestrator** model:
 
-### 3. Queue Management Features
-To make this work comfortably, several advanced logic gates are applied:
-*   **Recruitment**: If the queue is *almost* full enough to fire, the system "recruits" available **large high-mass zones** (like the Living Room) or the **Garage** to add load. These zones act as thermal batteries/ballast to efficiently absorb excess capacity.
-*   **Penalty Box**: If a zone successfully heats up and turns off, it enters a "Penalty Box" (10-minute cooldown) where it cannot request heat again, preventing jitter.
-*   **Scavenging**: If the boiler is already running, smaller zones are allowed to "piggyback" (scavenge) onto the active cycle even if they wouldn't satisfy the minimum load on their own. This feature can be toggled **per zone** via the `allow_scavenge: true/false` configuration parameter.
+*   **The Chain of Command**:
+    1.  **The Brain (Solar Manager)**: Sets the *strategy* (Preset Modes: Eco vs Comfort vs Boost) for each room based on weather.
+    2.  **The Officer (VTherm Proxy)**: Decides *if* heat is needed based on room temp vs target. It calculates the **TPI Pulse** (e.g., "Heat for 3 mins, then stop").
+    3.  **The Muscle (Radiant Manager)**: Physically opens/closes the zone valves to match the VTherm Proxy's state (`hvac_action`).
+    4.  **The Gatekeeper (Orchestrator)**: Controls the Central Boiler Bus.
+        *   **Ghost Load Protection**: The Orchestrator ensures the boiler *never* fires if the number of active zones is zero, even if the "Master Demand" switch is stuck ON. This prevents firing into a closed system.
+
+*   *Note*: The legacy `radiant_manager.py` queueing logic (Batching, Recruitment) is still present as a fallback "Classic Mode" but the primary driver is now the VTherm TPI loop.
 
 ### 4. Phase 4: Logic Hardening & Pulse Support (Jan 2026)
 To address "Flywheel Overshoot" in high-mass slabs and improve boiler safety, new logic layers were added:
@@ -82,18 +82,36 @@ Buffer zones are no longer held hostage blindly.
 3.  **Physical Off**: Hard veto. If User Tstat = Off, zone stays Off.
 4.  **Pulse Logic**: The "Soft" control layer.
 
-## Solar Manager Integration
-The system includes a dedicated `solar_manager.py` module that provides feed-forward thermal inputs based on weather forecasts.
-*   **Purpose**: To prevent overheating on sunny days by "braking" the slab charging early in the morning.
-*   **Rocket Logic**: If a rapid temperature rise (>10°F delta) and high solar gain (>4 hours) is predicted, the system shifts thermostats to `Eco` mode before sunrise.
-    *   **Variable Timing**: The "braking distance" is configurable. We use **90 minutes** (`OFFSET_MINUTES_BEFORE_SUNRISE`) to allow the slab to cool before the sun hits, but this can be adjusted (60m, 120m) based on your specific building envelope and glass exposure.
-*   **Catching the Knife (Dusk Boost)**: The inverse of Rocket Logic.
-    *   **Trigger**: If the sun is setting (last 20° elevation) and a cold night is predicted (`feels_like < 30°F` or `min < 25°F`).
-    *   **Action**: Shifts to `Boost` mode (+1°F) to pre-charge the slab, preventing the temperature "crash" that often happens at sunset.
-*   **Mechanism**: The Solar Manager switches the Versatile Thermostat "Preset Mode". Crucially, **these presets are configured individually per zone based on their specific characteristics**:
-    *   **Eco Mode**: Drops the target temperature based on that room's specific solar exposure. For example, a **Guest Room** (North facing) may only drop **1°F**, while a **Living Room** (South facing) may drop **3°F**.
-    *   **Comfort**: Normal TPI operation.
-    *   **Boost**: Increases target temp during dusk/damp conditions.
+## Solar Manager 2.0 (The Predictive Brain)
+The `solar_manager.py` module has evolved into a sophisticated proactive engine. It doesn't just react to weather; it **predicts** thermal behavior to optimize comfort and efficiency.
+
+### Core Logic Capabilities
+
+#### 1. "The Solar Brake" (Eco Mode)
+*   **Goal**: Prevent afternoon overheating in South/West facing rooms.
+*   **Trigger**:
+    *   **Rocket Logic**: If the system detects a "Massive Sun" event (>15°F predicted rise + 4 hours of clear sky), it engages the brakes *early*.
+    *   **Timing**: It shifts zones to `Eco` mode (lower setpoint) **up to 2 hours before sunrise**.
+    *   **Physics**: By letting the slab cool down *before* the sun hits, we create a "Thermal Pocket" that can absorb the solar energy without overheating the room.
+
+#### 2. "Catching The Knife" (Dusk Boost)
+*   **Goal**: Prevent the "Temperature Crash" at sunset.
+*   **Trigger**: When the sun drops below 20° elevation on a cold night (<30°F), the slab naturally dumps heat rapidly into the glass.
+*   **Action**: The system shifts to `Boost` mode (Target +1°F) for ~90 minutes.
+*   **Result**: This "pre-charges" the slab, building a thermal buffer to ride out the night, preventing that chilly feeling just after sunset.
+
+#### 3. "The Crystal Ball" (Tomorrow's Forecast)
+*   **New in 2026**: The system now scans the *next calendar day* (tomorrow).
+*   **Visualization**: The Dashboard displays "Forecast (Tom)" hours, giving the user a heads-up on whether tomorrow will be a "Free Heat" day or a "Boiler Day".
+
+#### 4. Environmental Failsafe
+*   **Safety Net**: Regardless of the solar prediction, if *any* room drops **1.0°F below its target**, the system declares a "Comfort Rollback".
+*   **Action**: It forces the Solar Brake OFF and returns to Comfort mode immediately. This ensures we never sacrifice comfort for a prediction that turned out wrong (e.g., unexpected fog).
+
+### Future Plans (Roadmap)
+*   **Material-Specific Backoffs**: Differentiating the brake release time for **Slab** (slow release) vs. **Gypcrete** (fast release).
+*   **Directional Awareness**: Split logic for **East Zones** (morning sun) vs. **South/West Zones** (afternoon sun). Currently, the brake applies globally.
+*   **Indoor Peak Prediction**: Using a thermal model to predict specific indoor peak temperatures based on outdoor gain.
 
 ## Material Profiles
 The system applies different logic based on floor material:
